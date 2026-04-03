@@ -1,19 +1,15 @@
-# syntax=docker/dockerfile:1
+## syntax=docker/dockerfile:1.7
 
-ARG PYTHON_VERSION=3.13.0a4
-FROM python:${PYTHON_VERSION}-alpine3.19 as base
+ARG PYTHON_VERSION=3.12.2
+FROM python:${PYTHON_VERSION}-alpine3.19 AS base
 
-# Prevents Python from writing pyc files.
-ENV PYTHONDONTWRITEBYTECODE=1
-
-# Keeps Python from buffering stdout and stderr to avoid situations where
-# the application crashes without emitting any logs due to buffering.
-ENV PYTHONUNBUFFERED=1
+# Security & runtime settings
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Create a non-privileged user that the app will run under.
-# See https://docs.docker.com/go/dockerfile-user-best-practices/
+# Create non-root user
 ARG UID=10001
 RUN adduser \
     --disabled-password \
@@ -24,24 +20,39 @@ RUN adduser \
     --uid "${UID}" \
     appuser
 
-# Download dependencies as a separate step to take advantage of Docker's caching.
-# Leverage a cache mount to /root/.cache/pip to speed up subsequent builds.
-# Leverage a bind mount to requirements.txt to avoid having to copy them into
-# into this layer.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=bind,source=requirements.txt,target=requirements.txt \
-    python -m pip install -r requirements.txt
+# Install system dependencies if needed (example: gcc for builds)
+# Remove if not required
+RUN apk add --no-cache \
+    build-base \
+    libffi-dev
 
-# Switch to the non-privileged user to run the application.
-USER appuser
+# Copy dependency file first (better caching)
+COPY requirements.txt .
 
-# Copy the source code(counter-service.py) into the container.
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
 COPY counter-service.py .
 
-# Expose the port that the application listens on.
-# In most Unix-like operating systems, binding to ports below 1024 requires elevated privileges.
-# This application runs on Docker as an appuser, which is restricted to binding to ports below 1024.
+# Fix ownership
+RUN mkdir -p /app/data && chown -R appuser:appuser /app
+
+# Drop privileges
+USER appuser
+
+# Expose application port
 EXPOSE 8080
 
-# Run the application.Logs enabled to see the output logs
-CMD ["gunicorn", "counter-service:app", "--bind", "0.0.0.0:8080", "--access-logfile", "-", "--error-logfile", "-"]
+# Optional: healthcheck (recommended for production)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget --quiet --tries=1 --spider http://localhost:8080/ || exit 1
+
+# Run application
+CMD ["gunicorn", "counter-service:app", \
+     "--bind", "0.0.0.0:8080", \
+     "--workers", "2", \
+     "--threads", "4", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-"]
